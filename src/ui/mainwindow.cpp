@@ -3,6 +3,8 @@
 #include "src/core/circuit/componentitem.h"
 #include "src/appsettings.h"
 #include "src/ui/editor/sketchlinter.h"
+#include <qnamespace.h>
+#include <qpushbutton.h>
 #include <regex>
 #include <algorithm>
 #include <cmath>
@@ -613,6 +615,18 @@ QWidget* MainWindow::buildCanvasPanel() {
     headerLabel->setStyleSheet("border: none; background: transparent;");
     headerLayout->addWidget(headerLabel);
     headerLayout->addStretch();
+
+    QPushButton* addCompButton = new QPushButton("Add/Remove", header);
+    addCompButton->setFixedSize(96, 18);
+    addCompButton->setProperty("role", "toggle");
+    addCompButton->setToolTip("Add/Remove Components injecting or removing code in the sketch");
+    connect(addCompButton, &QPushButton::clicked, this, [this]() {
+        AddComponentDialog dialog(this);
+        dialog.exec();
+    });
+    headerLayout->addWidget(addCompButton);
+
+    headerLayout->addSpacing(4);
 
     layoutButton_ = new QPushButton("Layout", header);
     layoutButton_->setCheckable(true);

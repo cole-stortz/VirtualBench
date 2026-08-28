@@ -85,6 +85,7 @@ set(SOURCES
     src/ui/panels/variablewatch.cpp
     src/ui/panels/devicespanel.cpp
     src/ui/panels/spipanel.cpp
+    src/ui/panels/addcomponentdialog.cpp
     src/ui/settingsdialog.cpp
     src/ui/apptheme.cpp
     src/ui/timelinerecorder.cpp
@@ -117,6 +118,7 @@ set(HEADERS
     src/ui/panels/variablewatch.h
     src/ui/panels/devicespanel.h
     src/ui/panels/spipanel.h
+    src/ui/panels/addcomponentdialog.h
     src/ui/settingsdialog.h
     src/ui/apptheme.h
     src/ui/timelinerecorder.h

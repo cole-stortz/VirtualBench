@@ -36,6 +36,7 @@
 #include "src/ui/panels/devicespanel.h"
 #include "src/ui/panels/spipanel.h"
 #include "src/ui/settingsdialog.h"
+#include "src/ui/panels/addcomponentdialog.h"
 #include "src/ui/apptheme.h"
 #include "src/core/runtime/boardprofile.h"
 #include "src/ui/editor/keybindmanager.h"
