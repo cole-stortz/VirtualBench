@@ -353,14 +353,85 @@ Run any number of sketches simultaneously in one window, each in its own tab, ra
 
 ---
 
-> ### Beta Release
-> Tag `v1.0-beta` after Phase 10 is complete. The tool is feature-complete enough for real-world use: the editor is polished and the API surface covers the common cases. Installer and auto-update (QtIFW + GitHub Releases as update repository) ships with the stable `v1.0` release — not before.
+### Phase 12 — Manual Add/Remove Component Dialog
+
+Reverse of every phase before it: instead of `CircuitDetector` inferring components from sketch code, a canvas-side dialog lets you add a component from the UI and generates the sketch code for it. To avoid two representations of the circuit drifting apart, added components are round-tripped through the existing `CircuitDetector`/`CanvasWidget::refresh()` pipeline rather than placed on the canvas directly — the sketch text stays the single source of truth, same as it is today.
+
+**Step 1 — Dialog shell + accordion rows (UI only, no codegen yet):**
+- [x] "+ Add Component" button in the canvas header next to `Layout`/`Reset` (`mainwindow.cpp` ~line 617-634)
+- [x] `AddComponentDialog` — modal `QDialog`, opened via `dialog.exec()`, same pattern as `SettingsDialog`
+- [ ] Accordion-row list (`QScrollArea` of custom row widgets, not a `QTableWidget`) with a collapsed header per row: nickname field, component type dropdown (populated from `ComponentRegistry::all()`), pin summary, remove button
+- [ ] Row expands in place to a dynamic spec section rebuilt from the selected `ComponentDefinition` — one pin+mode field for `detect_single` types, one row per `PinRole` for `detect_multi` types
+- [ ] Changing the type dropdown rebuilds/clears the spec section
+
+**Step 2 — Codegen for curated simple components (LED, button, buzzer, servo, potentiometer):**
+- [ ] Per-type template emitting a `#define` line (generated name must embed the type's `detect_single` keyword, e.g. nickname "frontDoor" + LED → `FRONTDOOR_LED_PIN`, or re-detection won't recognize it) plus one `pinMode()` call
+- [ ] Insertion-point logic — top-of-file (after includes/existing `#define`s) for the declaration, inside `setup()` for the `pinMode()` call
+- [ ] Marker comments wrapping each injected block, keyed by nickname (e.g. `// VEMCODE-COMPONENT:<nickname>:BEGIN` / `:END`)
+- [ ] On Add: inject into `codeEditor_`, then immediately call `detector_.detect(...)` + `canvasWidget_->refresh(detector_.components())` (the same pair already run at `mainwindow.cpp:1081-1082` on Run) so the canvas updates without waiting for a Run
+
+**Step 3 — Removal:**
+- [ ] Remove button locates the nickname's marker span(s) in the editor text and deletes them
+- [ ] Re-run detection/refresh after removal so the component drops off the canvas
+
+**Step 4 — Full component library:**
+- [ ] Multi-pin components (RGB LED, keypad matrix, LCD) — one spec-section layout per `PinRole` group
+- [ ] I2C/SPI and constructor-pattern components (MAX7219, NeoPixel, OLED, DHT) — spec section needs scalar fields (strip length, device count, display dimensions) instead of/alongside raw pin numbers, and codegen must emit the constructor-call shape each type's `detect_pattern` expects
+- [ ] Collision handling — warn/block if a nickname or generated define name already exists in the sketch
+
+> **Milestone:** A component added purely through the dialog (no hand-typed code) appears correctly wired on the canvas and runs; removing it via the dialog cleanly drops both the canvas item and its generated code.
+
+---
+
+### Phase 13 — ESP32 Simulation + RTOS/Multitasking
+
+Add ESP32 as a fully simulated board profile, not just a pin-count variant — GPIO-matrix-aware detection, a FreeRTOS-shaped task API (mandatory here, unlike AVR/STM32, since even Arduino-flavored ESP32 sketches assume a scheduler already exists underneath `loop()`), and the ESP32-specific Arduino-core API surface (LEDC PWM, Preferences/NVS, SPIFFS/LittleFS) that AVR never needed.
+
+Wireless stays mostly mocked, consistent with VEMCODE's no-real-network-code stance — WiFi and BLE/BT calls get fake success/data through the same virtual-panel pattern as Wire/SPI, no real sockets or radio involved. Two narrow, deliberate exceptions: a Bluetooth gamepad feature that only *consumes* input the host OS already trusts (never opens a port or advertises anything), and an opt-in, loopback-only `WebServer` for testing a sketch's own HTTP logic in a real browser on the same machine — never reachable off the host.
+
+**Foundation — board profile gating:**
+- [ ] Board profile's MCU field actually gates which register/library `.inc` files get compiled in, replacing today's unconditional injection of `avr_registers.inc`/`avr_timers.inc` into every sketch regardless of board
+- [ ] `BOARD_ESP32` profile entry (`boardprofile.h`) — pin count, 12-bit ADC resolution (not AVR's 10-bit); no fixed PWM resolution constant the way AVR has one, since LEDC is channel-configurable
+- [ ] GPIO matrix awareness — ESP32 lets most peripheral signals route to most pins at runtime instead of a fixed table; `CircuitDetector` needs to handle configurable pin-role assignment rather than assuming a fixed peripheral-to-pin map
+
+**RTOS / task model — new subsystem, not deferrable for ESP32:**
+- [ ] FreeRTOS-shaped task API shim — `xTaskCreate`, `xTaskCreatePinnedToCore`, `vTaskDelay`, semaphores/queues; needed because arduino-esp32's own `loop()` already runs as a FreeRTOS task under the hood, and many common ESP32 libraries assume the scheduler is real even in Arduino-flavored sketches
+- [ ] Decide up front: single-core cooperative/preemptive scheduler that ignores `xTaskCreatePinnedToCore`'s core argument, vs. an actual two-core model — a real fidelity trade-off, not something to leave implicit
+- [ ] Task Watchdog Timer (TWDT) simulation — if a task doesn't yield within its configured window, trigger the same kind of reset real hardware does (mirrors the existing `avr/wdt.h` watchdog-reset pattern from Phase 7); catches a genuinely common real ESP32 bug class rather than just being a compatibility shim
+
+**ESP32 Arduino-core API surface — mocked, no real radio:**
+- [ ] `WiFi.h` station/AP mode — fake connect success/failure, fake IP, virtual-panel pattern (a config table the sketch reads), same shape as the Wire/SPI virtual device panel
+- [ ] `BLEDevice.h` / `BluetoothSerial.h` — fake pairing and GATT read/write, no real radio touched
+- [ ] LEDC PWM (`ledcSetup`/`ledcAttachPin`/`ledcWrite`, or the newer `analogWrite()` wrapper) — a channel/frequency/resolution-configurable API, not a register-write shim like AVR's `OCR1A`
+- [ ] `Preferences.h` (NVS key-value storage) — distinct API and semantics from the existing `EEPROM.h` flash-backed compatibility shim
+- [ ] `SPIFFS.h` / `LittleFS.h` — flash filesystem calls; no AVR equivalent existed, but this is common in real ESP32 sketches serving local web dashboards/config
+- [ ] `Update.h` (OTA) — mocked/no-op, logs intent only; there's no second real device on the other end of a simulated flash
+
+**Bluetooth controller input — real hardware, no radio protocol work required:**
+- [ ] Read already-paired controller HID state from the host OS (evdev/`/dev/input/js*` on Linux, XInput/RawInput on Windows)
+- [ ] Bluepad32-shaped API shim (`ControllerPtr`, `axisX()`/`axisY()`, button bitmask, `onConnect`/`onDisconnect`) injected the same way `Servo.h`/`LiquidCrystal.h` are
+- [ ] Detection via `detect_custom` keyed off the constructor/init call — there's no pin to wire, so pin-keyword matching doesn't apply
+- [ ] New canvas element for a wireless peripheral — a connection-state/live-input panel, not a wired `ComponentItem` on the breadboard
+- [ ] `.timeline` support — a new action verb (e.g. `SET_CONTROLLER`) so controller-driven sketches stay scriptable in headless CI, consistent with how every other input is already testable
+- [ ] Decide single-controller vs. multi-controller support for v1 (Bluepad32 supports several at once on real hardware)
+
+**Local-loopback WebServer — opt-in, narrow exception to the no-real-sockets stance:**
+- [ ] Real TCP accept loop bound strictly to `127.0.0.1`/`::1`, verified at startup — never `0.0.0.0`
+- [ ] Explicit per-run opt-in before the listener opens, not silently triggered by `WiFi.begin()`/`server.begin()`
+- [ ] Ephemeral/random port by default rather than a fixed, guessable one
+- [ ] Real socket reads/writes piped into the sketch's `WiFiClient`/`WebServer` API shim, same background-thread pattern as existing Serial/I2C I/O
+
+**Deliberately out of scope for this phase:**
+- Real BLE/BT peripheral mode (the PC advertising itself as a discoverable device for a phone to connect to) — same real-radio, platform-fragmented (BlueZ/WinRT/CoreBluetooth), trust-boundary problem flagged during scoping; stays mocked
+- BT/BLE HID emulation (ESP32 presenting itself as a keyboard/gamepad to something else) — same bucket as above
+- ESP-NOW simulated as genuine inter-process IPC between simulated boards — a real, interesting option, but only makes sense once Phase 11's multi-board simulation exists; revisit after that milestone, not before
+
+> **Milestone:** An ESP32-profile sketch using mocked WiFi/BLE, LEDC PWM, and FreeRTOS-shaped tasks compiles and runs; a task that doesn't yield in time triggers a simulated watchdog reset; a real Bluetooth gamepad paired to the host feeds live input into a Bluepad32-style sketch on the canvas, and that input is scriptable via `.timeline`; a sketch's `WebServer` is reachable from a browser on the same machine and confirmed unreachable from anywhere else.
 
 ---
 
 ### Later
 
-- Add/Remove component button — detached window: dropdown + pin picker + define name, injects `#define`/`pinMode()` into the sketch. Hardest part: safely inserting into a hand-edited sketch without duplicating defines or disturbing other `pinMode` calls — v1 should be one-shot insert-only, anchored by a generated comment marker per component (e.g. `// VEMCODE:BTN1`), not full bidirectional canvas↔text sync
 - Step-through debugger — clickable gutter breakpoints, Step/Resume buttons; `impl_vb_breakpoint` blocks the sketch thread on a condition variable (same pattern as `impl_sleep_cpu`); variable watch and canvas already show paused state for free. Hardest part: needs a real line-boundary scanner (brace/paren-depth tracking, skip string/comment contents) to inject breakpoints safely — everything else in the preprocessor today is narrow regex, not real parsing
 - Installer — QtIFW with GitHub Releases as the update repository; bundle MinGW for zero-dependency install on Windows; package for common Linux distros
 - macOS support
@@ -369,7 +440,6 @@ Run any number of sketches simultaneously in one window, each in its own tab, ra
 - Memory analysis — flash/SRAM usage via `arduino-cli compile --format json` (skips raw avr-gcc, which lacks the Arduino core); blocks Run over a board's limit, warns on heap usage tracked separately in VEMCODE's own runtime; memory bar in UI, `.hex` export
 - Hardware Bridge — per-pin mixing of virtual and real: some pins stay canvas-driven, others wire to a real board over USB serial, same running sketch, no code changes either way (e.g. a virtual OLED/button UI paired with a real sensor under test). Native desktop app avoids the WebSerial/browser-permission friction a webUI sim would have doing the same thing
 - MicroPython / CircuitPython support — Python execution path on Pico and compatible boards using the same runtime, canvas, and signal timeline
-- ESP32 + Network Simulation — WiFi stubs and a mock HTTP server; deterministic, offline, and repeatable responses for firmware testing. Must avoid real sockets entirely (no actual `bind`/`connect`/`listen` to a real port) to preserve VEMCODE's "no network code" trust claim — same virtual-panel pattern as Wire/SPI: a configurable fake response the sketch reads, not an actual HTTP client/server
 - Signal timeline protocol decoder: The signal timeline already records every `(timestamp_µs, pin, level)` transition — the same data a logic analyzer captures. Add a decoder layer that runs over this stream.
 - RTC module (DS1307/DS3231) — another I2C device with no dedicated GPIO pin, same shape as the OLED; a good test of whether the synthetic-pin-key pattern (`Adafruit_SSD1306::NO_RESET_PIN_KEY`) actually generalizes to a second device or was an OLED-specific workaround
 - Accelerometer/Gyroscope (MPU6050) — another I2C component, but a different interaction shape than RTC/OLED (a live 3-axis value the user manipulates, not read-only or a framebuffer)
